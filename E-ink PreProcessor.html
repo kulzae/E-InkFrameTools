@@ -183,6 +183,7 @@ label.radio{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointe
 	    <label class="field-label" for="colorModeSelect">Color mode</label>
 		<select id="colorModeSelect">
       <option value="full" selected>6-color</option>
+      <option value="seven">7-color</option>
       <option value="four">4-color (B / W / Red / Yellow)</option>
       <option value="three">3-color (B / W / Red)</option>
       <option value="bw">Black &amp; White only</option>
@@ -239,18 +240,24 @@ const PALETTE = [
   { name:'Red',    measured:[117, 10, 0],    theoretical:[255, 0, 0] },
   { name:'Blue',   measured:[0, 47, 107],    theoretical:[0, 0, 255] },
   { name:'Green',  measured:[33, 69, 40],    theoretical:[0, 255, 0] },
+  { name:'Orange', measured:[207, 119, 95],  theoretical:[255, 128, 0] },
 ];
 const MEASURED    = PALETTE.map(c => c.measured);
 const THEORETICAL = PALETTE.map(c => c.theoretical);
 const BG_INDEX = { black:0, white:1 };          // indices into PALETTE above
 
 /* Stable name → index map for the PALETTE array (order is fixed above). */
-const PAL_INDEX = { black:0, white:1, yellow:2, red:3, blue:4, green:5 };
+const PAL_INDEX = { black:0, white:1, yellow:2, red:3, blue:4, green:5, orange:6 };
 
-/* Color mode → palette-index restriction. `null` means "no restriction"
- * (full 6-color). Mirrors how B&W mode already restricted to [black,white]. */
+/* Color mode → palette-index restriction. Each mode lists the exact indices it
+ * may use. `full` (default) is an explicit 6-color set so that adding Orange
+ * (index 6) does NOT leak into the default; `seven` opts in to all 7 colors. */
 const COLOR_MODES = {
-  full: null,                                              // all 6 colors
+  full: [PAL_INDEX.black, PAL_INDEX.white, PAL_INDEX.yellow,
+         PAL_INDEX.red, PAL_INDEX.blue, PAL_INDEX.green],   // all 6 colors (default)
+  seven:[PAL_INDEX.black, PAL_INDEX.white, PAL_INDEX.yellow,
+         PAL_INDEX.red, PAL_INDEX.blue, PAL_INDEX.green,
+         PAL_INDEX.orange],                                 // all 7 colors (+ Orange)
   four: [PAL_INDEX.black, PAL_INDEX.white,
          PAL_INDEX.yellow, PAL_INDEX.red],                 // B / W / Red / Yellow
   three:[PAL_INDEX.black, PAL_INDEX.white,
