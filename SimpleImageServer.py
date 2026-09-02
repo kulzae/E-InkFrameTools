@@ -331,8 +331,7 @@ class Handler(BaseHTTPRequestHandler):
         segments = [s for s in unquote(parsed.path).split("/") if s]
         if not segments:
             return None, None, (
-                "URL must name a folder, e.g. /1600x1200 or /800x480?rotate=90cw "
-                f"(available folders: {', '.join(self.store.available_folders()) or 'none'})")
+                "URL must name a folder, e.g. /LivingRoom or /800x480?rotate=90cw")
         folder = segments[-1]
 
         rotate_cmd = None
