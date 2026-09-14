@@ -30,3 +30,5 @@ Random selection, no repeats — one image at random per request, never the same
 
 Specify next image — type commands into the terminal while it runs: next <folder> <filename> to force one specific image (reverts to random afterwards), cancel, folders, help.
 
+No warranty or responsible for whatever you do with this.
+
