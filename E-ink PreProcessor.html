@@ -171,6 +171,12 @@ label.radio{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointe
 
   <div class="group">
     <h3>Dithering</h3>
+    <label class="field-label" for="matchSpaceSelect">Match in</label>
+    <select id="matchSpaceSelect">
+      <option value="rgb" selected>RGB</option>
+      <option value="lab">CIELAB</option>
+    </select>
+    <label class="field-label" for="algoSelect">Algorithm</label>
     <select id="algoSelect">
       <option value="nearest">Nearest Color (no dither)</option>
       <option value="atkinson">Atkinson</option>
@@ -178,7 +184,6 @@ label.radio{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointe
       <option value="burkes">Burkes</option>
       <option value="sierra">Sierra</option>
       <option value="bayer8">8×8 Bayer (ordered)</option>
-      <option value="fsLab">Floyd–Steinberg in CIELAB (RGB error)</option>
     </select>
 	    <label class="field-label" for="colorModeSelect">Color mode</label>
 		<select id="colorModeSelect">
@@ -226,8 +231,8 @@ label.radio{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointe
  *    (what the e-paper actually displays) — see MEASURED_PALETTE.md
  *  - BMP export writes THEORETICAL palette values so the firmware's
  *    exact-RGB matcher recognises every pixel.
- *  - Error-diffusion masks / Bayer matrix taken verbatim from
- *    DITHER_ALGORITHM_COEFFICIENTS.txt
+ *  - Error-diffusion masks use the canonical published coefficients
+ *    (Burkes & Sierra corrected to their standard ÷32 forms).
  *  - S-curve tone mapping per S-Curve.txt: Strength / Shadow Boost /
  *    Highlight Compress / Midpoint, fitted to the displayable range.
  * ===================================================================== */
@@ -280,15 +285,11 @@ const MASKS = {
     offsets:[[1,0],[-1,1],[0,1],[1,1]],
     weights:[7,3,5,1] },
   burkes:  { divisor:32,
-    offsets:[[1,0],[-2,1],[-1,1],[0,1],[1,1],[2,1]],
-    weights:[8,4,4,4,4,4] },
+    offsets:[[1,0],[2,0],[-2,1],[-1,1],[0,1],[1,1],[2,1]],
+    weights:[8,4,2,4,8,4,2] },
   sierra:  { divisor:32,
-    offsets:[[1,1],[2,1],[3,1],[1,2],[2,2],[3,2],[4,2],[5,2]],
-    weights:[2,1,2,1,1,1,1,1] },
-  /* Nearest-color decision in CIELAB (perceptual); error computed & diffused in RGB. */
-  fsLab:   { divisor:16,
-    offsets:[[1,0],[-1,1],[0,1],[1,1]],
-    weights:[7,3,5,1], useLab:true },
+    offsets:[[1,0],[2,0],[-2,1],[-1,1],[0,1],[1,1],[2,1],[-1,2],[0,2],[1,2]],
+    weights:[5,3,2,4,5,4,2,2,3,2] },
 };
 const BAYER8 = [
    0, 32,  8, 40,   2, 34, 10, 42,
@@ -314,10 +315,10 @@ const DEFAULTS = Object.freeze({
   sCurve:true, sStrength:90, sShadowBoost:0, sHighlightCompress:1.7, sMidpoint:50,
   resolution:'1600x1200', orientation:'landscape',
   blurOn:true, blurAmount:1,   // optional e-ink preview softening (preview only)
-  background:'white', algorithm:'floyd', colorMode:'full', format:'png',
+  background:'white', algorithm:'floyd', matchSpace:'rgb', errorSpace:'rgb', colorMode:'full', format:'png',
 });
 const ALGO_LABELS = { nearest:'Nearest', atkinson:'Atkinson', floyd:'Floyd–Steinberg',
-                      burkes:'Burkes', sierra:'Sierra', bayer8:'8×8 Bayer', fsLab:'FS (CIELAB)' };
+                      burkes:'Burkes', sierra:'Sierra', bayer8:'8×8 Bayer' };
 
 /* ---------------- State ---------------- */
 let state = { ...DEFAULTS };
@@ -499,41 +500,76 @@ function runDither(){
 }
 
 function runAlgorithm(algo, W, H, mask, px, idx){
+  const mLab = state.matchSpace === 'lab';
   if (algo === 'bayer8'){
     for (let y=0;y<H;y++) for (let x=0;x<W;x++){
       const i = y*W+x;
       if (!mask[i]) continue;
       const t = ((BAYER8[(y&7)*8 + (x&7)] / 64) - 0.5) * BAYER_AMPLITUDE;
-            idx[i] = pick(cl(px[i*3]+t), cl(px[i*3+1]+t), cl(px[i*3+2]+t), false);
+      const r=cl(px[i*3]+t), g=cl(px[i*3+1]+t), b=cl(px[i*3+2]+t);
+      if (mLab){ const L=srgb2lab(r,g,b); idx[i]=pickLAB(L[0],L[1],L[2]); }
+      else idx[i]=pickRGB(r,g,b);
     }
     return;
   }
   if (algo === 'nearest'){
     for (let i=0;i<mask.length;i++){
-            if (mask[i]) idx[i] = pick(cl(px[i*3]), cl(px[i*3+1]), cl(px[i*3+2]), false);
+      if (!mask[i]) continue;
+      const r=cl(px[i*3]), g=cl(px[i*3+1]), b=cl(px[i*3+2]);
+      if (mLab){ const L=srgb2lab(r,g,b); idx[i]=pickLAB(L[0],L[1],L[2]); }
+      else idx[i]=pickRGB(r,g,b);
     }
     return;
   }
   const M = MASKS[algo];
-  for (let y=0;y<H;y++){
-    for (let x=0;x<W;x++){
+  const eLab = state.errorSpace === 'lab';
+  if (eLab){
+    /* Error diffused in CIELAB: the working buffer (px) holds LAB floats. Convert
+     * every covered pixel RGB->LAB once; the effective pixel value is read in LAB. */
+    for (let i=0;i<mask.length;i++){
+      if (!mask[i]) continue;
+      const L = srgb2lab(cl(px[i*3]), cl(px[i*3+1]), cl(px[i*3+2]));
+      px[i*3]=L[0]; px[i*3+1]=L[1]; px[i*3+2]=L[2];
+    }
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){
       const i = y*W+x;
-      if (!mask[i]) continue;                    // background: untouched, no bleed
-      let r = cl(px[i*3]), g = cl(px[i*3+1]), b = cl(px[i*3+2]);
-            const c = pick(r,g,b,M.useLab);
+      if (!mask[i]) continue;
+      const Lc=px[i*3], Ac=px[i*3+1], Bc=px[i*3+2];   // effective current value (LAB)
+      let c;
+      if (mLab){ c = pickLAB(Lc,Ac,Bc); }
+      else { const rgb = lab2srgb(Lc,Ac,Bc); c = pickRGB(rgb[0],rgb[1],rgb[2]); }
       idx[i] = c;
-      /* Quantization error is computed & diffused in RGB (even for fsLab). */
-      const er = r - MEASURED[c][0], eg = g - MEASURED[c][1], eb = b - MEASURED[c][2];
-      const off = M.offsets, wt = M.weights, div = M.divisor;
+      const P = LAB_MEASURED[c];                        // error in LAB
+      const eL=Lc-P[0], ea=Ac-P[1], eB=Bc-P[2];
+      const off=M.offsets, wt=M.weights, div=M.divisor;
       for (let k=0;k<off.length;k++){
-        const nx = x+off[k][0], ny = y+off[k][1];
+        const nx=x+off[k][0], ny=y+off[k][1];
         if (nx<0 || ny<0 || nx>=W || ny>=H) continue;
-        const ni = ny*W + nx;
-        if (!mask[ni]) continue;                 // don't diffuse onto background
-        const wgt = wt[k]/div, p3 = ni*3;
-        px[p3]   += er*wgt;
-        px[p3+1] += eg*wgt;
-        px[p3+2] += eb*wgt;
+        const ni=ny*W+nx;
+        if (!mask[ni]) continue;                        // don't diffuse onto background
+        const wgt=wt[k]/div, p3=ni*3;
+        px[p3]  += eL*wgt; px[p3+1] += ea*wgt; px[p3+2] += eB*wgt;
+      }
+    }
+  } else {
+    /* Error diffused in RGB (original behavior): px holds RGB floats. */
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+      const i = y*W+x;
+      if (!mask[i]) continue;                            // background: untouched, no bleed
+      const r=cl(px[i*3]), g=cl(px[i*3+1]), b=cl(px[i*3+2]);  // effective current value (RGB)
+      let c;
+      if (mLab){ const L=srgb2lab(r,g,b); c=pickLAB(L[0],L[1],L[2]); }
+      else c = pickRGB(r,g,b);
+      idx[i] = c;
+      const er=r-MEASURED[c][0], eg=g-MEASURED[c][1], eb=b-MEASURED[c][2];  // error in RGB
+      const off=M.offsets, wt=M.weights, div=M.divisor;
+      for (let k=0;k<off.length;k++){
+        const nx=x+off[k][0], ny=y+off[k][1];
+        if (nx<0 || ny<0 || nx>=W || ny>=H) continue;
+        const ni=ny*W+nx;
+        if (!mask[ni]) continue;                        // don't diffuse onto background
+        const wgt=wt[k]/div, p3=ni*3;
+        px[p3]  += er*wgt; px[p3+1] += eg*wgt; px[p3+2] += eb*wgt;
       }
     }
   }
@@ -555,27 +591,35 @@ function nearestMeasured(r,g,b){
 /* When non-null, every dithering decision is restricted to these palette indices. */
 let DITHER_SET = null;
 
-/* Honors the active restriction. With no restriction it delegates to the
- * existing matchers, so current behavior is unchanged. In a restricted mode
- * (B&W / 3-color / 4-color) only fsLab matches in CIELAB (perceptual); all
- * other algorithms keep squared-RGB distance over the allowed colors. */
-function pick(r,g,b,useLab){
-  if (!DITHER_SET) return useLab ? nearestLab(r,g,b) : nearestMeasured(r,g,b);
+/* Color-matching decision, honoring the active DITHER_SET restriction. The color
+ * space (RGB vs CIELAB) is chosen by the "Color space" dropdown and applies to
+ * whichever algorithm is selected. With no restriction it delegates to the
+ * unrestricted matchers, so default behavior is unchanged. */
+function pickRGB(r,g,b){
+  if (!DITHER_SET) return nearestMeasured(r,g,b);
   let best = DITHER_SET[0], bd = Infinity;
-  if (useLab){
-    const L = srgb2lab(r,g,b);
-    for (let k=0;k<DITHER_SET.length;k++){
-      const M = LAB_MEASURED[DITHER_SET[k]];
-      const dl=L[0]-M[0], dm=L[1]-M[1], dz=L[2]-M[2];
-      const d = dl*dl + dm*dm + dz*dz;
-      if (d < bd){ bd = d; best = DITHER_SET[k]; }
+  for (let k=0;k<DITHER_SET.length;k++){
+    const c = MEASURED[DITHER_SET[k]];
+    const d = (r-c[0])*(r-c[0]) + (g-c[1])*(g-c[1]) + (b-c[2])*(b-c[2]);
+    if (d < bd){ bd = d; best = DITHER_SET[k]; }
+  }
+  return best;
+}
+function pickLAB(L,a,b){
+  if (!DITHER_SET){
+    let best = 0, bd = Infinity;
+    for (let i=0;i<LAB_MEASURED.length;i++){
+      const M = LAB_MEASURED[i];
+      const d = (L-M[0])*(L-M[0]) + (a-M[1])*(a-M[1]) + (b-M[2])*(b-M[2]);
+      if (d < bd){ bd = d; best = i; }
     }
-  } else {
-    for (let k=0;k<DITHER_SET.length;k++){
-      const c = MEASURED[DITHER_SET[k]];
-      const d = (r-c[0])*(r-c[0]) + (g-c[1])*(g-c[1]) + (b-c[2])*(b-c[2]);
-      if (d < bd){ bd = d; best = DITHER_SET[k]; }
-    }
+    return best;
+  }
+  let best = DITHER_SET[0], bd = Infinity;
+  for (let k=0;k<DITHER_SET.length;k++){
+    const M = LAB_MEASURED[DITHER_SET[k]];
+    const d = (L-M[0])*(L-M[0]) + (a-M[1])*(a-M[1]) + (b-M[2])*(b-M[2]);
+    if (d < bd){ bd = d; best = DITHER_SET[k]; }
   }
   return best;
 }
@@ -591,18 +635,18 @@ function srgb2lab(r,g,b){
   X=f(X); Y=f(Y); Z=f(Z);
   return [116*Y-16, 500*(X-Y), 200*(Y-Z)];
 }
-const LAB_MEASURED = MEASURED.map(c => srgb2lab(c[0],c[1],c[2]));
-function nearestLab(r,g,b){
-  const L = srgb2lab(r,g,b);
-  let best=0, bd=Infinity;
-  for (let i=0;i<LAB_MEASURED.length;i++){
-    const M = LAB_MEASURED[i];
-    const dl=L[0]-M[0], dm=L[1]-M[1], dz=L[2]-M[2];
-    const dist = dl*dl + dm*dm + dz*dz;
-    if (dist < bd){ bd = dist; best = i; }
-  }
-  return best;
+/* CIELAB (D65) → sRGB. Exact inverse of srgb2lab above. */
+function lab2srgb(L,a,b){
+  const fy=(L+16)/116, fx=a/500+fy, fz=fy-b/200;
+  const g = t => { const t3=t*t*t; return t3>0.008856 ? t3 : (t-16/116)/7.787; };
+  const X=g(fx)*0.95047, Y=g(fy), Z=g(fz)*1.08883;
+  let R= X*3.2404542 - Y*1.5371385 - Z*0.4985314;
+  let G=-X*0.9692660 + Y*1.8760108 + Z*0.0415560;
+  let B= X*0.0556434 - Y*0.2040259 + Z*1.0572252;
+  const gam = c => { c = c<=0.0031308 ? 12.92*c : 1.055*Math.pow(c,1/2.4)-0.055; return cl(c*255); };
+  return [gam(R), gam(G), gam(B)];
 }
+const LAB_MEASURED = MEASURED.map(c => srgb2lab(c[0],c[1],c[2]));
 
 /* ---------------- BMP export (theoretical palette) ---------------- */
 function makeBMP(W,H,idx){
@@ -848,6 +892,7 @@ document.querySelectorAll('input[name=bg]').forEach(r => r.addEventListener('cha
   if (r.checked){ state.background = r.value; scheduleRender(); }
 }));
 
+$('matchSpaceSelect').addEventListener('change', e => { state.matchSpace = e.target.value; scheduleRender(); });
 $('algoSelect').addEventListener('change', e => { state.algorithm = e.target.value; scheduleRender(); });
 $('colorModeSelect').addEventListener('change', e => { state.colorMode = e.target.value; scheduleRender(); });
 
@@ -865,6 +910,7 @@ function syncControlsUI(){
   $('resSelect').value = state.resolution;
   $('orientSelect').value = state.orientation;
   $(state.background === 'black' ? 'bgBlack' : 'bgWhite').checked = true;
+  $('matchSpaceSelect').value = state.matchSpace;
   $('algoSelect').value = state.algorithm;
     $('colorModeSelect').value = state.colorMode;
   $('fmtSelect').value = state.format;
